@@ -17,7 +17,7 @@ import (
 
 const (
 	name    = "mouse"
-	version = "0.1.0"
+	version = "0.1.1"
 )
 
 var config = struct {
@@ -38,6 +38,12 @@ func main() {
 	if rootPath != "" {
 		config.RootPath = rootPath
 	}
+	absPath, err := filepath.Abs(config.RootPath)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	absPath = strings.ReplaceAll(absPath, "\\", "/")
+	config.RootPath = absPath
 	if *versionFlag {
 		fmt.Printf("%s version %s\n", name, version)
 		fmt.Println("happy new year!")
