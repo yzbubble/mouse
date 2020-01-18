@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"flag"
+	"fmt"
 	"html/template"
 	"io/ioutil"
 	"log"
@@ -13,116 +15,82 @@ import (
 	"gopkg.in/russross/blackfriday.v2"
 )
 
+const (
+	name    = "mouse"
+	version = "0.1.0"
+)
+
 var config = struct {
-	root         string
-	addr         string
-	templatePath string
-	indexPath    string
-}{
-	root:         ".",
-	addr:         ":8080",
-	templatePath: "",
-	indexPath:    "index.md",
-}
+	Addr         string
+	RootPath     string
+	IndexPaths   string
+	TemplatePath string
+}{}
 
 func main() {
-	loadEnvConfig()
-	loadFlagConfig()
-	log.Printf("Mouse listen and serve on %q ...", config.addr)
-	if err := http.ListenAndServe(config.addr, http.HandlerFunc(render)); err != nil {
+	flag.StringVar(&config.Addr, "a", ":8080", "http addr")
+	flag.StringVar(&config.RootPath, "r", "./", "root path")
+	flag.StringVar(&config.IndexPaths, "i", "index.md,README.md,readme.md", "index paths")
+	flag.StringVar(&config.TemplatePath, "m", "default", "markdown template path")
+	versionFlag := flag.Bool("v", false, "show version")
+	flag.Parse()
+	rootPath := flag.Arg(0)
+	if rootPath != "" {
+		config.RootPath = rootPath
+	}
+	if *versionFlag {
+		fmt.Printf("%s version %s\n", name, version)
+		fmt.Println("happy new year!")
+		return
+	}
+	log.Printf("[info]: root path = %q", config.RootPath)
+	log.Printf("[info]: %s listen and serve on %q ...", name, config.Addr)
+	if err := http.ListenAndServe(config.Addr, http.HandlerFunc(render)); err != nil {
 		log.Fatalln(err)
 	}
 }
 
-func loadEnvConfig() {
-	if v, ok := os.LookupEnv("mouse_root"); ok {
-		config.root = v
-	}
-	if v, ok := os.LookupEnv("mouse_addr"); ok {
-		config.addr = v
-	}
-	if v, ok := os.LookupEnv("mouse_template_path"); ok {
-		config.templatePath = v
-	}
-	if v, ok := os.LookupEnv("mouse_index_path"); ok {
-		config.indexPath = v
-	}
-}
-
-func loadFlagConfig() {
-	root := flag.String("root", ".", "resources root path")
-	addr := flag.String("addr", ":8080", "http addr")
-	templatePath := flag.String("template", "", "template file path")
-	indexPath := flag.String("index", "index.md", "default index file path")
-	flag.Parse()
-	if *root != "" {
-		config.root = *root
-	}
-	if *addr != "" {
-		config.addr = *addr
-	}
-	if *templatePath != "" {
-		if *templatePath == "nil" {
-			config.templatePath = ""
-		} else {
-			config.templatePath = *templatePath
-		}
-	}
-	templateFlag := flag.Lookup("template")
-	if templateFlag == nil {
-		log.Println("templateFlag is nil")
-	}
-	if *indexPath != "" {
-		config.indexPath = *indexPath
-	}
-}
-
 func render(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	if path == "" {
-		path = "/" + config.indexPath
-	}
-	if strings.HasSuffix(path, "/") {
-		path += config.indexPath
-	}
-	if filepath.Ext(path) == "" {
-		path += ".md"
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	path = config.root + path
-	fileName := filepath.Base(path)
-	log.Printf("[debug]: url path map: %q => %q\n", r.URL.String(), path)
-	bs, err := ioutil.ReadFile(path)
+	file, err := loadFileByURLPath(r.URL.Path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
-			return
-		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	ext := filepath.Ext(path)
+	log.Printf("[info]: url path map: %q => %q\n", r.URL.String(), file.Name())
+	buffer, err := ioutil.ReadAll(file)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+	ext := filepath.Ext(file.Name())
 	switch ext {
 	case "", ".md":
 		w.Header().Set("Content-Type", "text/html")
+		// CRLF to LF, fix: https://github.com/russross/blackfriday/issues/551
+		buffer := bytes.ReplaceAll(buffer, []byte("\r"), []byte(""))
+		content := string(blackfriday.Run(buffer, blackfriday.WithExtensions(blackfriday.CommonExtensions)))
 		context := struct {
-			Title   string
-			Content template.HTML
+			FileName string
+			Content  template.HTML
 		}{
-			Title:   fileName,
-			Content: template.HTML(string(blackfriday.Run(bs))),
+			FileName: filepath.Base(file.Name()),
+			Content:  template.HTML(content),
 		}
 		var tpl *template.Template
-		if config.templatePath == "" {
+		if config.TemplatePath == "" {
+			err = fmt.Errorf("require markdown template path")
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if config.TemplatePath == "default" {
 			tpl, err = template.New("default").Parse(defaultTemplate)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 		} else {
-			tpl, err = template.ParseFiles(config.templatePath)
+			tpl, err = template.ParseFiles(config.TemplatePath)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -134,10 +102,51 @@ func render(w http.ResponseWriter, r *http.Request) {
 		}
 	case ".htm", ".html":
 		w.Header().Set("Content-Type", "text/html")
-		w.Write(bs)
+		w.Write(buffer)
 		return
 	default:
-		w.Write(bs)
+		w.Write(buffer)
 		return
 	}
+}
+
+func loadFileByURLPath(urlPath string) (*os.File, error) {
+	filePath := joinFilePath(config.RootPath, urlPath)
+	if strings.HasSuffix(urlPath, "/") {
+		findIndexPath := ""
+		items := strings.Split(config.IndexPaths, ",")
+		for _, item := range items {
+			item = strings.TrimSpace(item)
+			_, err := os.Stat(joinFilePath(filePath, item))
+			if err == nil {
+				findIndexPath = item
+				break
+			}
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		if findIndexPath == "" {
+			return nil, fmt.Errorf("index file not found on dir %q", filePath)
+		}
+		filePath = joinFilePath(filePath, findIndexPath)
+	}
+	if filepath.Ext(filePath) == "" {
+		filePath += ".md"
+	}
+	return os.Open(filePath)
+}
+
+func joinFilePath(a, b string) string {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" && b == "" {
+		return ""
+	} else if a != "" && b == "" {
+		return a
+	} else if a == "" && b != "" {
+		return b
+	}
+	return strings.TrimRight(a, "/") + "/" + strings.TrimLeft(b, "/")
 }
