@@ -17,7 +17,7 @@ import (
 
 const (
 	name    = "mouse"
-	version = "0.1.1"
+	version = "0.1.2"
 )
 
 var config = struct {
